@@ -11,6 +11,10 @@ module.exports = {
       'features/steps/**/*.ts',
     ],
     paths: ['features/**/*.feature'],
-    format: ['progress', 'html:cucumber-report/index.html'],
+    format: [
+      'progress',
+      'html:cucumber-report/index.html',
+      'json:cucumber-report/cucumber.json', // for Jira Xray (import execution)
+    ],
   },
 };

@@ -1,0 +1,142 @@
+# Jira Xray can trigger this workflow (GitHub: "Run workflow" or API / Xray "Trigger GitHub workflow"),
+# and optionally import Cucumber results back to Xray when secrets and execution metadata are set.
+# Tag scenarios in Gherkin with the Jira *Test* issue key, e.g. @PROJ-123 (see features/*.feature).
+name: Xray (Cucumber)
+
+on:
+  workflow_dispatch:
+    inputs:
+      xray_test_key:
+        description: "Single Jira test issue key (must match a @TAG on a scenario, e.g. PROJ-123). Leave empty to run the full suite."
+        required: false
+        type: string
+        default: ""
+      cucumber_tag_expression:
+        description: "Optional. Full Cucumber tag expression (e.g. @A or @B). Overrides xray_test_key if set."
+        required: false
+        type: string
+        default: ""
+      xray_test_exec_key:
+        description: "Optional. Jira Xray *Test Execution* issue to attach the Cucumber report to (requires Xray secrets and project key)."
+        required: false
+        type: string
+        default: ""
+      xray_project_key:
+        description: "Optional. Jira project key (e.g. PROJ). Required for result import when not implied elsewhere."
+        required: false
+        type: string
+        default: ""
+  repository_dispatch:
+    types: [xray-cucumber]
+
+concurrency:
+  group: xray-cucumber-${{ github.ref }}-${{ github.event_name }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  xray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve Jira / Xray parameters
+        id: p
+        shell: bash
+        env:
+          E_NAME: ${{ github.event_name }}
+          IN_KEY: ${{ inputs.xray_test_key }}
+          IN_TAG: ${{ inputs.cucumber_tag_expression }}
+          IN_EXEC: ${{ inputs.xray_test_exec_key }}
+          IN_PROJ: ${{ inputs.xray_project_key }}
+        run: |
+          if [ "$E_NAME" = "repository_dispatch" ]; then
+            KEY="${{ github.event.client_payload.xray_test_key }}"
+            TAG="${{ github.event.client_payload.cucumber_tag_expression }}"
+            EXEC="${{ github.event.client_payload.xray_test_exec_key }}"
+            PROJ="${{ github.event.client_payload.xray_project_key }}"
+          else
+            KEY="${IN_KEY:-}"
+            TAG="${IN_TAG:-}"
+            EXEC="${IN_EXEC:-}"
+            PROJ="${IN_PROJ:-}"
+          fi
+          CUCUMBER_TAGS=""
+          if [ -n "$TAG" ]; then
+            CUCUMBER_TAGS="$TAG"
+          elif [ -n "$KEY" ]; then
+            CUCUMBER_TAGS="@$KEY"
+          fi
+          echo "cucumber_tags=${CUCUMBER_TAGS}" >> "$GITHUB_OUTPUT"
+          echo "xray_test_exec_key=${EXEC}" >> "$GITHUB_OUTPUT"
+          echo "xray_project_key=${PROJ}" >> "$GITHUB_OUTPUT"
+          if [ -n "$CUCUMBER_TAGS" ]; then
+            echo "Running with tag filter: $CUCUMBER_TAGS"
+          else
+            echo "Running full Cucumber suite (no tag filter)"
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright (Chromium)
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Cucumber (Xray)
+        env:
+          CI: true
+          CUCUMBER_TAGS: ${{ steps.p.outputs.cucumber_tags }}
+        run: |
+          set -e
+          if [ -n "$CUCUMBER_TAGS" ]; then
+            npx cucumber-js --tags "$CUCUMBER_TAGS"
+          else
+            npm run test:cucumber
+          fi
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xray-cucumber-report
+          path: |
+            cucumber-report/
+          if-no-files-found: ignore
+
+      - name: Gate Xray result import
+        id: ximport
+        if: always()
+        env:
+          XRAY_CLIENT_ID: ${{ secrets.XRAY_CLIENT_ID }}
+          XRAY_CLIENT_SECRET: ${{ secrets.XRAY_CLIENT_SECRET }}
+          XRAY_EXEC: ${{ steps.p.outputs.xray_test_exec_key }}
+          XRAY_PROJ: ${{ steps.p.outputs.xray_project_key }}
+        run: |
+          if [ -n "${XRAY_CLIENT_ID}" ] && [ -n "${XRAY_CLIENT_SECRET}" ] && [ -n "$XRAY_EXEC" ] && [ -n "$XRAY_PROJ" ] && [ -f cucumber-report/cucumber.json ]; then
+            echo "do=1" >> "$GITHUB_OUTPUT"
+            echo "Xray result import: enabled"
+          else
+            echo "do=0" >> "$GITHUB_OUTPUT"
+            echo "Xray result import: skipped (missing secrets, report file, or execution/project keys)"
+          fi
+
+      - name: Import results to Xray
+        if: always() && steps.ximport.outputs.do == '1'
+        uses: mikepenz/xray-action@v4.1.1
+        with:
+          xrayCloud: "true"
+          username: ${{ secrets.XRAY_CLIENT_ID }}
+          password: ${{ secrets.XRAY_CLIENT_SECRET }}
+          testFormat: "cucumber"
+          testPaths: "cucumber-report/cucumber.json"
+          testExecKey: ${{ steps.p.outputs.xray_test_exec_key }}
+          projectKey: ${{ steps.p.outputs.xray_project_key }}
+          failOnImportError: "true"
+        # Xray Server / Data Center: set xrayCloud: "false", set xrayBaseUrl, and use xrayToken or Jira user/password. See: https://github.com/mikepenz/xray-action
