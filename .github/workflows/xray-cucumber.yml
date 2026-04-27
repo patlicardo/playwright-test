@@ -165,9 +165,13 @@ jobs:
           testPaths: "cucumber-report/cucumber.json"
           testExecutionJson: "cucumber-report/xray-multipart-info.json"
           testExecKey: ""
-          projectKey: ${{ steps.p.outputs.xray_project_key }}
+          # Must stay empty: if projectKey is set, xray-action also appends a "testInfo" form part, and
+          # Xray Cloud returns "Unexpected field (testInfo) (11)" for Cucumber multipart. Project
+          # is already in xray-multipart-info.json (written in the step above).
+          projectKey: ""
           testMerge: "false"
           failOnImportError: "true"
         # xray-action uses multipart when testExecutionJson is set and testExecKey is empty; testExecKey
         # is supplied inside the JSON (xrayFields) so Xray updates the existing Test Execution.
-        # Xray Server / Data Center: set xrayCloud: "false", xrayBaseUrl, and use xrayToken or Jira user/password. See: https://github.com/mikepenz/xray-action
+        # Xray Server / Data Center: set xrayCloud: "false", set xrayBaseUrl, and use xrayToken or Jira
+        # user/password. See: https://github.com/mikepenz/xray-action

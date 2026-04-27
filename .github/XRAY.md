@@ -12,6 +12,10 @@ On **Xray Cloud**, the *standard* REST endpoint `POST /api/v2/import/execution/c
 
 The workflow in this repo uses the **Cucumber multipart** import instead: a small `info` JSON (with `xrayFields.testExecKey` set to your existing *Test Execution*, e.g. PT-2) is sent with the `cucumber.json` so Xray can **attach to that execution** rather than open a new one.
 
+### If you see `Unexpected field (testInfo) (11)`
+
+`mikepenz/xray-action` can add a `testInfo` part to the multipart form when it also receives a **non-empty** `projectKey` input, even if you did not mean to send it. The Xray Cloud Cucumber **multipart** endpoint does not expect that part. The *Import* step in our workflow uses `projectKey: ""` and keeps the Jira project on the *Prepare* `info` file instead, so the request only has `info` and `results`.
+
 ## GitHub: repository secrets (for Xray)
 
 For **Xray Cloud**, create a **Client id** and **Client secret** under Jira: **Jira** → **Apps** → **Xray** → **API** (or your org’s current path). In the GitHub repo, add:
