@@ -6,6 +6,12 @@
 2. An execution is started from Xray (or another automation) by calling the GitHub workflow **`Xray (Cucumber)`** (file: `.github/workflows/xray-cucumber.yml`) and passing the **Test** key you want to run, e.g. `DEMO-101`. Cucumber is invoked as `cucumber-js --tags @DEMO-101`.
 3. After the run, optional **Xray result import** uploads `cucumber-report/cucumber.json` to a Jira *Test Execution* (when API secrets and keys are set).
 
+## Why a new Test Execution (e.g. PT-3) was created instead of updating PT-2
+
+On **Xray Cloud**, the *standard* REST endpoint `POST /api/v2/import/execution/cucumber` (non-multipart) **creates a new** Test Execution for that import. Query parameters like `testExecKey` on that call do not attach the report to an existing run (see Xray’s [code snippets and REST docs](https://github.com/Xray-App/xray-code-snippets) for Cucumber: *“a Test Execution will be created”*). That is why `mikepenz/xray-action` could log your requested key and still return a **new** key in the response.
+
+The workflow in this repo uses the **Cucumber multipart** import instead: a small `info` JSON (with `xrayFields.testExecKey` set to your existing *Test Execution*, e.g. PT-2) is sent with the `cucumber.json` so Xray can **attach to that execution** rather than open a new one.
+
 ## GitHub: repository secrets (for Xray)
 
 For **Xray Cloud**, create a **Client id** and **Client secret** under Jira: **Jira** → **Apps** → **Xray** → **API** (or your org’s current path). In the GitHub repo, add:
