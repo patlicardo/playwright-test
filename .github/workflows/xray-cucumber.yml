@@ -127,51 +127,14 @@ jobs:
             echo "Xray result import: skipped (missing secrets, report file, or execution/project keys)"
           fi
 
-      # Xray Cloud: the *standard* /import/execution/cucumber endpoint does not target an existing
-      # Test Execution (query params are ineffective); it always creates a new Test Execution. To
-      # attach to an existing one (e.g. PT-2), mikepenz/xray-action must use the *multipart* API
-      # with xrayFields.testExecKey in the "info" JSON. See: Xray-App xray-code-snippets, Importing Cucumber.
-      - name: Prepare Xray multipart "info" (attach to existing Test Execution)
-        if: always() && steps.ximport.outputs.do == '1'
-        env:
-          XRAY_PROJ: ${{ steps.p.outputs.xray_project_key }}
-          XRAY_EXEC: ${{ steps.p.outputs.xray_test_exec_key }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const o = {
-            fields: {
-              project: { key: process.env.XRAY_PROJ },
-              summary: `Cucumber (GitHub Actions run ${process.env.RUN_ID})`,
-            },
-            xrayFields: {
-              testExecKey: process.env.XRAY_EXEC,
-            },
-          };
-          fs.mkdirSync('cucumber-report', { recursive: true });
-          fs.writeFileSync('cucumber-report/xray-multipart-info.json', JSON.stringify(o, null, 2));
-          NODE
-          echo "Wrote xrayFields.testExecKey=${XRAY_EXEC}"
-
+      # Xray Cloud: multipart "info".xrayFields.testExecKey is invalid. mikepenz/xray-action also
+      # appends testInfo when projectKey is set (rejected by Cloud). We import with a small script
+      # that calls POST /api/v2/import/execution/cucumber?projectKey=&testExecIssueKey= (see scripts).
       - name: Import results to Xray
         if: always() && steps.ximport.outputs.do == '1'
-        uses: mikepenz/xray-action@v4.1.1
-        with:
-          xrayCloud: "true"
-          username: ${{ secrets.XRAY_CLIENT_ID }}
-          password: ${{ secrets.XRAY_CLIENT_SECRET }}
-          testFormat: "cucumber"
-          testPaths: "cucumber-report/cucumber.json"
-          testExecutionJson: "cucumber-report/xray-multipart-info.json"
-          testExecKey: ""
-          # Must stay empty: if projectKey is set, xray-action also appends a "testInfo" form part, and
-          # Xray Cloud returns "Unexpected field (testInfo) (11)" for Cucumber multipart. Project
-          # is already in xray-multipart-info.json (written in the step above).
-          projectKey: ""
-          testMerge: "false"
-          failOnImportError: "true"
-        # xray-action uses multipart when testExecutionJson is set and testExecKey is empty; testExecKey
-        # is supplied inside the JSON (xrayFields) so Xray updates the existing Test Execution.
-        # Xray Server / Data Center: set xrayCloud: "false", set xrayBaseUrl, and use xrayToken or Jira
-        # user/password. See: https://github.com/mikepenz/xray-action
+        env:
+          XRAY_CLIENT_ID: ${{ secrets.XRAY_CLIENT_ID }}
+          XRAY_CLIENT_SECRET: ${{ secrets.XRAY_CLIENT_SECRET }}
+          XRAY_PROJECT_KEY: ${{ steps.p.outputs.xray_project_key }}
+          XRAY_TEST_EXEC_KEY: ${{ steps.p.outputs.xray_test_exec_key }}
+        run: node scripts/xray-import-cucumber.cjs

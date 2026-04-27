@@ -6,15 +6,17 @@
 2. An execution is started from Xray (or another automation) by calling the GitHub workflow **`Xray (Cucumber)`** (file: `.github/workflows/xray-cucumber.yml`) and passing the **Test** key you want to run, e.g. `DEMO-101`. Cucumber is invoked as `cucumber-js --tags @DEMO-101`.
 3. After the run, optional **Xray result import** uploads `cucumber-report/cucumber.json` to a Jira *Test Execution* (when API secrets and keys are set).
 
-## Why a new Test Execution (e.g. PT-3) was created instead of updating PT-2
+## How results are imported to an existing *Test Execution*
 
-On **Xray Cloud**, the *standard* REST endpoint `POST /api/v2/import/execution/cucumber` (non-multipart) **creates a new** Test Execution for that import. Query parameters like `testExecKey` on that call do not attach the report to an existing run (see Xray’s [code snippets and REST docs](https://github.com/Xray-App/xray-code-snippets) for Cucumber: *“a Test Execution will be created”*). That is why `mikepenz/xray-action` could log your requested key and still return a **new** key in the response.
+The workflow runs `scripts/xray-import-cucumber.cjs` after a successful `cucumber.json` is produced. It authenticates to **Xray Cloud** and then calls:
 
-The workflow in this repo uses the **Cucumber multipart** import instead: a small `info` JSON (with `xrayFields.testExecKey` set to your existing *Test Execution*, e.g. PT-2) is sent with the `cucumber.json` so Xray can **attach to that execution** rather than open a new one.
+`POST /api/v2/import/execution/cucumber?projectKey=…&testExecIssueKey=…`
 
-### If you see `Unexpected field (testInfo) (11)`
+with the Cucumber file as the JSON body. This matches what many teams use in Jira/Community posts (the parameter name is **`testExecIssueKey`**, not `testExecKey` in `xrayFields`).
 
-`mikepenz/xray-action` can add a `testInfo` part to the multipart form when it also receives a **non-empty** `projectKey` input, even if you did not mean to send it. The Xray Cloud Cucumber **multipart** endpoint does not expect that part. The *Import* step in our workflow uses `projectKey: ""` and keeps the Jira project on the *Prepare* `info` file instead, so the request only has `info` and `results`.
+**Why we stopped using the third-party GitHub action here:** the standard **multipart** `info` file cannot set `xrayFields.testExecKey` (Xray Cloud returns *invalid field: testExecKey*), and the action can also send an extra `testInfo` part that Xray Cloud rejects with *Unexpected field (testInfo)*. The script only sends what the Cloud v2 import expects.
+
+**If a new Test Execution (e.g. PT-3) still appears:** double-check in Jira that the issue is really a *Test Execution* in that project, is in a state that allows new runs, and that your Gherkin tags map to the *Test* issues in that run. If the API still misbehaves, see [Import Execution Results (REST) – Xray Cloud](https://docs.getxray.app/display/XRAYCLOUD/Import+Execution+Results+-+REST+v2) or Xray support.
 
 ## GitHub: repository secrets (for Xray)
 
@@ -75,5 +77,5 @@ If your team uses Xray to **export** Gherkin from Jira, keep those tags/keys in 
 ## Resources
 
 - [Trigger a GitHub workflow (Xray documentation)](https://docs.getxray.app/) — search the docs for your product’s GitHub / CI page.
-- [mikepenz/xray-action](https://github.com/mikepenz/xray-action) — imports Cucumber JSON into Xray.
+- [mikepenz/xray-action](https://github.com/mikepenz/xray-action) — optional; this repo uses `scripts/xray-import-cucumber.cjs` for Cloud to avoid the issues above.
 - [Xray: Import execution results](https://docs.getxray.app/) — official API/behavior for reports.
