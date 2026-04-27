@@ -8,3 +8,5 @@ node_modules/
 /playwright/.auth/
 /cucumber-report/
 /temp
+# Local env for debugging Xray import (see .env.local.example)
+.env.local

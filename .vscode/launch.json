@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug: xray-import-cucumber",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/xray-import-cucumber.cjs",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"],
+      "envFile": "${workspaceFolder}/.env.local"
+    }
+  ]
+}

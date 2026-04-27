@@ -1,28 +1,17 @@
 # Jira Xray can trigger this workflow (GitHub: "Run workflow" or API / Xray "Trigger GitHub workflow"),
 # and optionally import Cucumber results back to Xray when secrets and execution metadata are set.
-# Tag scenarios in Gherkin with the Jira *Test* issue key, e.g. @PROJ-123 (see features/*.feature).
+# Test key comes from feature filename: {TESTKEY}--{description}.feature (e.g. PT-1--login.feature).
 name: Xray (Cucumber)
 
 on:
   workflow_dispatch:
     inputs:
-      xray_test_key:
-        description: "Single Jira test issue key (must match a @TAG on a scenario, e.g. PROJ-123). Leave empty to run the full suite."
-        required: false
-        type: string
-        default: ""
-      cucumber_tag_expression:
-        description: "Optional. Full Cucumber tag expression (e.g. @A or @B). Overrides xray_test_key if set."
-        required: false
-        type: string
-        default: ""
       xray_test_exec_key:
-        description: "Optional. Jira Xray *Test Execution* issue to attach the Cucumber report to (requires Xray secrets and project key)."
-        required: false
+        description: "Jira Xray Test Execution key to update (e.g. PT-2)."
+        required: true
         type: string
-        default: ""
-      xray_project_key:
-        description: "Optional. Jira project key (e.g. PROJ). Required for result import when not implied elsewhere."
+      xray_test_key:
+        description: "Optional Jira Test key to run a single feature (e.g. PT-1). If empty, runs all compliant features."
         required: false
         type: string
         default: ""
@@ -46,35 +35,26 @@ jobs:
         shell: bash
         env:
           E_NAME: ${{ github.event_name }}
-          IN_KEY: ${{ inputs.xray_test_key }}
-          IN_TAG: ${{ inputs.cucumber_tag_expression }}
           IN_EXEC: ${{ inputs.xray_test_exec_key }}
-          IN_PROJ: ${{ inputs.xray_project_key }}
+          IN_KEY: ${{ inputs.xray_test_key }}
         run: |
           if [ "$E_NAME" = "repository_dispatch" ]; then
-            KEY="${{ github.event.client_payload.xray_test_key }}"
-            TAG="${{ github.event.client_payload.cucumber_tag_expression }}"
             EXEC="${{ github.event.client_payload.xray_test_exec_key }}"
-            PROJ="${{ github.event.client_payload.xray_project_key }}"
+            KEY="${{ github.event.client_payload.xray_test_key }}"
           else
-            KEY="${IN_KEY:-}"
-            TAG="${IN_TAG:-}"
             EXEC="${IN_EXEC:-}"
-            PROJ="${IN_PROJ:-}"
+            KEY="${IN_KEY:-}"
           fi
-          CUCUMBER_TAGS=""
-          if [ -n "$TAG" ]; then
-            CUCUMBER_TAGS="$TAG"
-          elif [ -n "$KEY" ]; then
-            CUCUMBER_TAGS="@$KEY"
+          if [ -z "$EXEC" ]; then
+            echo "xray_test_exec_key is required"
+            exit 1
           fi
-          echo "cucumber_tags=${CUCUMBER_TAGS}" >> "$GITHUB_OUTPUT"
+          echo "xray_test_key=${KEY}" >> "$GITHUB_OUTPUT"
           echo "xray_test_exec_key=${EXEC}" >> "$GITHUB_OUTPUT"
-          echo "xray_project_key=${PROJ}" >> "$GITHUB_OUTPUT"
-          if [ -n "$CUCUMBER_TAGS" ]; then
-            echo "Running with tag filter: $CUCUMBER_TAGS"
+          if [ -n "$KEY" ]; then
+            echo "Running only feature(s) for key: $KEY"
           else
-            echo "Running full Cucumber suite (no tag filter)"
+            echo "Running all compliant feature files"
           fi
 
       - name: Setup Node.js
@@ -92,13 +72,37 @@ jobs:
       - name: Run Cucumber (Xray)
         env:
           CI: true
-          CUCUMBER_TAGS: ${{ steps.p.outputs.cucumber_tags }}
+          XRAY_TEST_KEY: ${{ steps.p.outputs.xray_test_key }}
         run: |
           set -e
-          if [ -n "$CUCUMBER_TAGS" ]; then
-            npx cucumber-js --tags "$CUCUMBER_TAGS"
+          shopt -s nullglob
+          files=(features/*.feature)
+          compliant=()
+          for f in "${files[@]}"; do
+            base="$(basename "$f")"
+            if [[ "$base" =~ ^[A-Z][A-Z0-9_]+-[0-9]+--.+\.feature$ ]]; then
+              compliant+=("$f")
+            fi
+          done
+          if [ "${#compliant[@]}" -eq 0 ]; then
+            echo "No compliant feature files found (expected: {TESTKEY}--{name}.feature)."
+            exit 1
+          fi
+          if [ -n "$XRAY_TEST_KEY" ]; then
+            selected=()
+            for f in "${compliant[@]}"; do
+              base="$(basename "$f")"
+              if [[ "$base" == "${XRAY_TEST_KEY}"--*.feature ]]; then
+                selected+=("$f")
+              fi
+            done
+            if [ "${#selected[@]}" -eq 0 ]; then
+              echo "No feature file found for test key: $XRAY_TEST_KEY"
+              exit 1
+            fi
+            npx cucumber-js "${selected[@]}"
           else
-            npm run test:cucumber
+            npx cucumber-js "${compliant[@]}"
           fi
 
       - name: Upload reports
@@ -117,14 +121,13 @@ jobs:
           XRAY_CLIENT_ID: ${{ secrets.XRAY_CLIENT_ID }}
           XRAY_CLIENT_SECRET: ${{ secrets.XRAY_CLIENT_SECRET }}
           XRAY_EXEC: ${{ steps.p.outputs.xray_test_exec_key }}
-          XRAY_PROJ: ${{ steps.p.outputs.xray_project_key }}
         run: |
-          if [ -n "${XRAY_CLIENT_ID}" ] && [ -n "${XRAY_CLIENT_SECRET}" ] && [ -n "$XRAY_EXEC" ] && [ -n "$XRAY_PROJ" ] && [ -f cucumber-report/cucumber.json ]; then
+          if [ -n "${XRAY_CLIENT_ID}" ] && [ -n "${XRAY_CLIENT_SECRET}" ] && [ -n "$XRAY_EXEC" ] && [ -f cucumber-report/cucumber.json ]; then
             echo "do=1" >> "$GITHUB_OUTPUT"
             echo "Xray result import: enabled"
           else
             echo "do=0" >> "$GITHUB_OUTPUT"
-            echo "Xray result import: skipped (missing secrets, report file, or execution/project keys)"
+            echo "Xray result import: skipped (missing secrets, report file, or execution key)"
           fi
 
       # Xray Cloud: import with ?testExecutionKey=... (not testExecIssueKey — wrong name = new PT-*).
@@ -133,7 +136,5 @@ jobs:
         env:
           XRAY_CLIENT_ID: ${{ secrets.XRAY_CLIENT_ID }}
           XRAY_CLIENT_SECRET: ${{ secrets.XRAY_CLIENT_SECRET }}
-          XRAY_PROJECT_KEY: ${{ steps.p.outputs.xray_project_key }}
           XRAY_TEST_EXEC_KEY: ${{ steps.p.outputs.xray_test_exec_key }}
-        # Optional: XRAY_OMIT_PROJECT_KEY: "1"  XRAY_ALLOW_NEW_EXECUTION: "1"
         run: node scripts/xray-import-cucumber.cjs

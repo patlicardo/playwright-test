@@ -1,9 +1,13 @@
 /**
- * Xray Cloud: POST /api/v2/import/execution/cucumber
- * Use query param **testExecutionKey** to target an existing *Test Execution* (not testExecIssueKey
- * or testExecKey — if those are used, the API can ignore them and create a new execution).
- * @see https://docs.getxray.app/display/XRAYCLOUD/Import+Execution+Results+-+REST+v2
- * @see https://docs.getxray.app/display/XRAYCLOUD/Using+Xray+JSON+format+to+import+execution+results
+ * Converts Cucumber JSON report to Xray /import/execution payload and uploads it.
+ *
+ * Target payload shape:
+ * {
+ *   "testExecutionKey": "PT-2",
+ *   "tests": [
+ *     { "testKey": "PT-1", "comment": "...", "status": "PASSED" }
+ *   ]
+ * }
  */
 /* eslint-disable no-console */
 const fs = require('node:fs');
@@ -11,6 +15,7 @@ const path = require('node:path');
 
 const defaultBase = 'https://xray.cloud.getxray.app';
 const reportPath = process.env.XRAY_CUCUMBER_JSON || 'cucumber-report/cucumber.json';
+const jiraKeyRegex = /^[A-Z][A-Z0-9_]+-\d+$/;
 
 function pickBase() {
   const b = (process.env.XRAY_BASE_URL || defaultBase).replace(/\/$/, '');
@@ -20,103 +25,155 @@ function pickBase() {
   return b;
 }
 
+function mapStatus(stepStatuses) {
+  if (stepStatuses.some((s) => s === 'failed')) return 'FAILED';
+  if (stepStatuses.some((s) => s === 'ambiguous' || s === 'undefined' || s === 'pending')) return 'TODO';
+  if (stepStatuses.some((s) => s === 'skipped')) return 'TODO';
+  return 'PASSED';
+}
+
+function pickFeatureTestKey(featureUri) {
+  const uri = String(featureUri || '');
+  const file = path.basename(uri);
+  const separatorIdx = file.indexOf('--');
+  if (separatorIdx <= 0 || !file.toLowerCase().endsWith('.feature')) {
+    throw new Error(
+      `Feature filename must match "{testKey}--{description}.feature". Got "${file || uri}".`
+    );
+  }
+  const testKey = file.slice(0, separatorIdx).trim();
+  if (!jiraKeyRegex.test(testKey)) {
+    throw new Error(`Invalid test key "${testKey}" in feature filename "${file}".`);
+  }
+  return testKey;
+}
+
+function extractEvidence(step) {
+  const out = [];
+  const embeds = Array.isArray(step.embeddings) ? step.embeddings : [];
+  let idx = 0;
+  for (const e of embeds) {
+    const mime = e.mime_type || e.media?.type || '';
+    if (!mime.startsWith('image/')) continue;
+    const data = e.data || (typeof e.media?.binary === 'string' ? e.media.binary : '');
+    if (!data) continue;
+    idx += 1;
+    out.push({
+      filename: `scenario-step-${idx}.${mime.split('/')[1] || 'png'}`,
+      contentType: mime,
+      data,
+    });
+  }
+  return out;
+}
+
+function readCucumber() {
+  const abs = path.resolve(process.cwd(), reportPath);
+  if (!fs.existsSync(abs)) throw new Error(`Cucumber report not found: ${abs}`);
+  const raw = fs.readFileSync(abs, 'utf8');
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) throw new Error('Expected cucumber-report/cucumber.json to be an array');
+  return parsed;
+}
+
+function buildExecutionPayload(cucumber, testExecutionKey) {
+  if (!testExecutionKey) {
+    throw new Error('XRAY_TEST_EXEC_KEY is required');
+  }
+
+  const testsByKey = new Map();
+  for (const feature of cucumber) {
+    const featureTestKey = pickFeatureTestKey(feature.uri);
+    const scenarios = Array.isArray(feature.elements) ? feature.elements : [];
+    for (const s of scenarios) {
+      if (s.type !== 'scenario') continue;
+      const testKey = featureTestKey;
+      const steps = (Array.isArray(s.steps) ? s.steps : []).filter((st) => !st.hidden);
+      const statuses = steps.map((st) => String(st.result?.status || '').toLowerCase()).filter(Boolean);
+      const status = mapStatus(statuses);
+      const failed = steps.find((st) => String(st.result?.status || '').toLowerCase() === 'failed');
+      const failMsg = failed && failed.result?.error_message ? String(failed.result.error_message).trim() : '';
+      const commentParts = [
+        `Scenario: ${s.name || s.id || 'Unnamed scenario'}`,
+        `Result: ${status}`,
+      ];
+      if (failMsg) commentParts.push(`Failure: ${failMsg}`);
+      const comment = commentParts.join('\n');
+      const evidences = failed ? extractEvidence(failed) : [];
+
+      const prev = testsByKey.get(testKey);
+      if (!prev) {
+        testsByKey.set(testKey, { testKey, comment, status, evidences });
+        continue;
+      }
+      // Merge repeated scenarios that map to the same Jira Test key.
+      const mergedStatus = prev.status === 'FAILED' || status === 'FAILED'
+        ? 'FAILED'
+        : prev.status === 'TODO' || status === 'TODO'
+          ? 'TODO'
+          : 'PASSED';
+      testsByKey.set(testKey, {
+        testKey,
+        status: mergedStatus,
+        comment: `${prev.comment}\n\n${comment}`,
+        evidences: [...(prev.evidences || []), ...evidences],
+      });
+    }
+  }
+  const tests = Array.from(testsByKey.values()).map((t) => {
+    const result = {
+      testKey: t.testKey,
+      comment: t.comment,
+      status: t.status,
+    };
+    if (Array.isArray(t.evidences) && t.evidences.length > 0) {
+      result.evidences = t.evidences;
+    }
+    return result;
+  });
+  if (tests.length === 0) {
+    throw new Error('No scenarios found in cucumber report.');
+  }
+  return { testExecutionKey, tests };
+}
+
 async function auth(base) {
   const id = process.env.XRAY_CLIENT_ID;
   const secret = process.env.XRAY_CLIENT_SECRET;
-  if (!id || !secret) {
-    throw new Error('XRAY_CLIENT_ID and XRAY_CLIENT_SECRET are required');
-  }
+  if (!id || !secret) throw new Error('XRAY_CLIENT_ID and XRAY_CLIENT_SECRET are required');
   const r = await fetch(`${base}/api/v2/authenticate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ client_id: id, client_secret: secret }),
   });
   const text = await r.text();
-  if (!r.ok) {
-    throw new Error(`Xray authenticate failed: ${r.status} ${text}`);
-  }
-  let token = text.trim();
-  if (token.startsWith('"') && token.endsWith('"')) {
-    try {
-      token = JSON.parse(token);
-    } catch {
-      // keep raw
-    }
-  }
-  return token;
+  if (!r.ok) throw new Error(`Xray authenticate failed: ${r.status} ${text}`);
+  return text.startsWith('"') ? JSON.parse(text) : text.trim();
 }
 
-/**
- * @param {string} testExecutionKey  Jira key of the existing Test Execution (e.g. PT-2)
- */
-function buildImportUrl(base, projectKey, testExecutionKey) {
-  // Official Cloud docs use "testExecutionKey" for the existing TE; other names are often ignored
-  // and a new Test Execution is created (e.g. PT-4) even when you pass a key.
-  const u = new URL('/api/v2/import/execution/cucumber', base);
-  u.searchParams.set('testExecutionKey', testExecutionKey);
-  const omit = process.env.XRAY_OMIT_PROJECT_KEY === '1' || process.env.XRAY_OMIT_PROJECT_KEY === 'true';
-  if (projectKey && !omit) {
-    u.searchParams.set('projectKey', projectKey);
-  }
-  return u.toString();
-}
-
-async function importCucumber(base, token) {
-  const projectKey = process.env.XRAY_PROJECT_KEY;
-  const testExecKey = process.env.XRAY_TEST_EXEC_KEY;
-  if (!projectKey || !testExecKey) {
-    throw new Error('XRAY_PROJECT_KEY and XRAY_TEST_EXEC_KEY are required');
-  }
-  const abs = path.resolve(process.cwd(), reportPath);
-  if (!fs.existsSync(abs)) {
-    throw new Error(`Cucumber report not found: ${abs}`);
-  }
-  const body = fs.readFileSync(abs);
-  const url = buildImportUrl(base, projectKey, testExecKey);
-  const r = await fetch(url, {
+async function upload(base, token, payload) {
+  const url = new URL('/api/v2/import/execution', base);
+  const r = await fetch(url.toString(), {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body,
+    body: JSON.stringify(payload),
   });
   const out = await r.text();
-  if (!r.ok) {
-    throw new Error(`Xray import failed: ${r.status} ${out}`);
-  }
+  if (!r.ok) throw new Error(`Xray import failed: ${r.status} ${out}`);
   console.log(out);
-  // Cloud often still creates a *new* Test Execution (new issue key) if the query is ignored
-  // or the execution cannot be updated (status, or tests not in that run).
-  let parsed;
-  try {
-    parsed = JSON.parse(out);
-  } catch {
-    return;
-  }
-  const newKey = parsed && parsed.key;
-  if (newKey && newKey === testExecKey) {
-    return;
-  }
-  if (newKey && newKey !== testExecKey) {
-    const msg =
-      `Xray returned issue ${newKey} but you asked to record results in ${testExecKey} — ` +
-      `a new Test Execution was created instead of updating the existing one. ` +
-      `Check: (1) use an Open Test Execution, (2) the Cucumber @tags match the Tests linked to that run, ` +
-      `(3) Xray Cloud “Import” docs for the exact query parameters on your org (see .github/XRAY.md). ` +
-      `To allow new TE from CI, set XRAY_ALLOW_NEW_EXECUTION=1.`;
-    if (process.env.XRAY_ALLOW_NEW_EXECUTION === '1' || process.env.XRAY_ALLOW_NEW_EXECUTION === 'true') {
-      console.warn('Warning: ' + msg);
-      return;
-    }
-    throw new Error(msg);
-  }
 }
 
 async function main() {
   const base = pickBase();
+  const testExecutionKey = process.env.XRAY_TEST_EXEC_KEY;
+  if (!testExecutionKey) throw new Error('XRAY_TEST_EXEC_KEY is required');
+  const cucumber = readCucumber();
+  const payload = buildExecutionPayload(cucumber, testExecutionKey);
   const token = await auth(base);
-  await importCucumber(base, token);
+  await upload(base, token, payload);
 }
 
 main().catch((e) => {
