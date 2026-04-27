@@ -8,15 +8,23 @@
 
 ## How results are imported to an existing *Test Execution*
 
-The workflow runs `scripts/xray-import-cucumber.cjs` after a successful `cucumber.json` is produced. It authenticates to **Xray Cloud** and then calls:
+The workflow runs `scripts/xray-import-cucumber.cjs` after a successful `cucumber.json` is produced. It calls:
 
-`POST /api/v2/import/execution/cucumber?projectKey=…&testExecIssueKey=…`
+`POST /api/v2/import/execution/cucumber?testExecutionKey=PT-2&projectKey=PT`  
 
-with the Cucumber file as the JSON body. This matches what many teams use in Jira/Community posts (the parameter name is **`testExecIssueKey`**, not `testExecKey` in `xrayFields`).
+( **`testExecutionKey`**, *not* `testExecKey` or `testExecIssueKey`—those are easy to mix up, and the wrong one is often **ignored** so Xray still creates a **new** Test Execution, e.g. PT-3 / PT-4, with a summary like *Execution results [ … ]*)
 
-**Why we stopped using the third-party GitHub action here:** the standard **multipart** `info` file cannot set `xrayFields.testExecKey` (Xray Cloud returns *invalid field: testExecKey*), and the action can also send an extra `testInfo` part that Xray Cloud rejects with *Unexpected field (testInfo)*. The script only sends what the Cloud v2 import expects.
+The import script checks the response: if the Jira `key` in the JSON is **not** the execution you asked for, the step **fails** on purpose, unless you set **`XRAY_ALLOW_NEW_EXECUTION=1`** in the workflow (only if you are OK with a new Test Execution on every import).
 
-**If a new Test Execution (e.g. PT-3) still appears:** double-check in Jira that the issue is really a *Test Execution* in that project, is in a state that allows new runs, and that your Gherkin tags map to the *Test* issues in that run. If the API still misbehaves, see [Import Execution Results (REST) – Xray Cloud](https://docs.getxray.app/display/XRAYCLOUD/Import+Execution+Results+-+REST+v2) or Xray support.
+**Why the API still may create a new Test Execution (even with the right query):**
+
+- The target issue must be a **Xray *Test Execution*** that can accept a new automated run (some workflows: only **open** or **in progress**; **Done** may still create a new one—try a fresh TE or re-open the issue).
+- The **Cucumber JSON** / scenario **tags** should match the *Test* issues that are (or will be) on that run; otherwise Xray can create a new execution. Align `@PT-1` (or your Test keys) with the Tests added to **PT-2** in Jira, or use a Test Plan that already links them.
+- If in doubt, use the Jira *Test Execution* issue → **Xray** → import results **from the UI** once, and compare the network request to the script in `scripts/xray-import-cucumber.cjs`.
+
+**Optional env for the import step (only if you use a custom job):** `XRAY_OMIT_PROJECT_KEY=1` (omit `projectKey` from the query) if you test whether `projectKey` confuses the “update” path.
+
+**More:** [Import Execution Results (REST) – Xray Cloud](https://docs.getxray.app/display/XRAYCLOUD/Import+Execution+Results+-+REST+v2) · [Xray JSON / testExecutionKey](https://docs.getxray.app/display/XRAYCLOUD/Using+Xray+JSON+format+to+import+execution+results)
 
 ## GitHub: repository secrets (for Xray)
 

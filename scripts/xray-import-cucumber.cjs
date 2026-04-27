@@ -1,8 +1,9 @@
 /**
- * Xray Cloud: POST /api/v2/import/execution/cucumber with testExecIssueKey + projectKey.
- * The multipart "info" file cannot set testExecKey in xrayFields (API rejects that field);
- * the non-multipart endpoint targets an existing Test Execution via query string instead.
+ * Xray Cloud: POST /api/v2/import/execution/cucumber
+ * Use query param **testExecutionKey** to target an existing *Test Execution* (not testExecIssueKey
+ * or testExecKey — if those are used, the API can ignore them and create a new execution).
  * @see https://docs.getxray.app/display/XRAYCLOUD/Import+Execution+Results+-+REST+v2
+ * @see https://docs.getxray.app/display/XRAYCLOUD/Using+Xray+JSON+format+to+import+execution+results
  */
 /* eslint-disable no-console */
 const fs = require('node:fs');
@@ -45,11 +46,18 @@ async function auth(base) {
   return token;
 }
 
-function buildImportUrl(base, projectKey, testExecKey) {
-  // Xray Cloud v2 uses testExecIssueKey (not testExecKey) for this endpoint.
+/**
+ * @param {string} testExecutionKey  Jira key of the existing Test Execution (e.g. PT-2)
+ */
+function buildImportUrl(base, projectKey, testExecutionKey) {
+  // Official Cloud docs use "testExecutionKey" for the existing TE; other names are often ignored
+  // and a new Test Execution is created (e.g. PT-4) even when you pass a key.
   const u = new URL('/api/v2/import/execution/cucumber', base);
-  u.searchParams.set('projectKey', projectKey);
-  u.searchParams.set('testExecIssueKey', testExecKey);
+  u.searchParams.set('testExecutionKey', testExecutionKey);
+  const omit = process.env.XRAY_OMIT_PROJECT_KEY === '1' || process.env.XRAY_OMIT_PROJECT_KEY === 'true';
+  if (projectKey && !omit) {
+    u.searchParams.set('projectKey', projectKey);
+  }
   return u.toString();
 }
 
@@ -78,6 +86,31 @@ async function importCucumber(base, token) {
     throw new Error(`Xray import failed: ${r.status} ${out}`);
   }
   console.log(out);
+  // Cloud often still creates a *new* Test Execution (new issue key) if the query is ignored
+  // or the execution cannot be updated (status, or tests not in that run).
+  let parsed;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    return;
+  }
+  const newKey = parsed && parsed.key;
+  if (newKey && newKey === testExecKey) {
+    return;
+  }
+  if (newKey && newKey !== testExecKey) {
+    const msg =
+      `Xray returned issue ${newKey} but you asked to record results in ${testExecKey} — ` +
+      `a new Test Execution was created instead of updating the existing one. ` +
+      `Check: (1) use an Open Test Execution, (2) the Cucumber @tags match the Tests linked to that run, ` +
+      `(3) Xray Cloud “Import” docs for the exact query parameters on your org (see .github/XRAY.md). ` +
+      `To allow new TE from CI, set XRAY_ALLOW_NEW_EXECUTION=1.`;
+    if (process.env.XRAY_ALLOW_NEW_EXECUTION === '1' || process.env.XRAY_ALLOW_NEW_EXECUTION === 'true') {
+      console.warn('Warning: ' + msg);
+      return;
+    }
+    throw new Error(msg);
+  }
 }
 
 async function main() {

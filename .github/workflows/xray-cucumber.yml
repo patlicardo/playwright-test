@@ -127,9 +127,7 @@ jobs:
             echo "Xray result import: skipped (missing secrets, report file, or execution/project keys)"
           fi
 
-      # Xray Cloud: multipart "info".xrayFields.testExecKey is invalid. mikepenz/xray-action also
-      # appends testInfo when projectKey is set (rejected by Cloud). We import with a small script
-      # that calls POST /api/v2/import/execution/cucumber?projectKey=&testExecIssueKey= (see scripts).
+      # Xray Cloud: import with ?testExecutionKey=... (not testExecIssueKey — wrong name = new PT-*).
       - name: Import results to Xray
         if: always() && steps.ximport.outputs.do == '1'
         env:
@@ -137,4 +135,5 @@ jobs:
           XRAY_CLIENT_SECRET: ${{ secrets.XRAY_CLIENT_SECRET }}
           XRAY_PROJECT_KEY: ${{ steps.p.outputs.xray_project_key }}
           XRAY_TEST_EXEC_KEY: ${{ steps.p.outputs.xray_test_exec_key }}
+        # Optional: XRAY_OMIT_PROJECT_KEY: "1"  XRAY_ALLOW_NEW_EXECUTION: "1"
         run: node scripts/xray-import-cucumber.cjs
